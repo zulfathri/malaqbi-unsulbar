@@ -79,7 +79,7 @@ with st.sidebar:
         "kontribusi karya ilmiah sivitas akademika Unsulbar terhadap 17 pilar Pembangunan Berkelanjutan (SDGs) PBB."
     )
     st.markdown("---")
-    st.markdown("**© 2026 SDGs Center Unsulbar** \n*Powered by* **CLICKTAP.ID**")
+    st.markdown("**© 2026 SDGs Center Unsulbar** \n*Powered by* **ClickTap.id**")
 
 # --- 6. TATA LETAK WORKSPACE (2 KOLOM UTAMA) ---
 col_input, col_dashboard = st.columns([1, 1.3])
