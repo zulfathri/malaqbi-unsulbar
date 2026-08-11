@@ -72,14 +72,14 @@ st.markdown(
 with st.sidebar:
     st.image(
         "https://upload.wikimedia.org/wikipedia/commons/thumb/5/52/SustainableDevelopmentGoalsLogoAlone.svg/960px-SustainableDevelopmentGoalsLogoAlone.svg.png",
-        use_column_width=True)
+        use_container_width=True) # <--- Ubah kembali bagian ini
     st.markdown("### 🏛️ Tentang MALAQBI")
     st.info(
         "MALAQBI adalah sistem berbasis **Kecerdasan Buatan (AI)** untuk mengukur seberapa besar dampak dan "
         "kontribusi karya ilmiah sivitas akademika Unsulbar terhadap 17 pilar Pembangunan Berkelanjutan (SDGs) PBB."
     )
     st.markdown("---")
-    st.markdown("**© 2026 SDGs Center Unsulbar** \n*Powered by* **ClickTap.id**")
+    st.markdown("**© 2026 SDGs Center Unsulbar** \n*Powered by* **CLICKTAP.ID**")
 
 # --- 6. TATA LETAK WORKSPACE (2 KOLOM UTAMA) ---
 col_input, col_dashboard = st.columns([1, 1.3])
