@@ -4,6 +4,7 @@ import time
 import pandas as pd
 import pdfplumber
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 from transformers import pipeline
 
@@ -49,6 +50,28 @@ NOMOR_KE_WARNA = {no: warna for no, _, warna in SDG_DATA}
 # 3. DAFTAR MODEL AI (Hugging Face Hub)
 # ============================================================
 MODEL_REGISTRY = {
+    "🏛️ Elsevier SDG mBERT (via Aurora API)": {
+        "path": "elsevier-sdg-multi",
+        "task": "aurora-api",
+        "jenis": "Fine-Tuned mBERT multi-label, definisi SDG versi Elsevier (diakses melalui Aurora SDG API)",
+        "bahasa": "Multibahasa (104 bahasa), termasuk Bahasa Indonesia",
+        "cakupan": list(range(1, 17)),
+        "catatan": (
+            "Model yang sama dengan yang digunakan SMART Universitas Pertamina. "
+            "Teks dikirim ke server Aurora di Eropa untuk diproses, sehingga memerlukan koneksi internet."
+        ),
+    },
+    "🌐 Aurora SDG mBERT (via Aurora API)": {
+        "path": "aurora-sdg-multi",
+        "task": "aurora-api",
+        "jenis": "Fine-Tuned mBERT multi-label, definisi SDG versi Aurora Universities Network (diakses melalui Aurora SDG API)",
+        "bahasa": "Multibahasa (104 bahasa), termasuk Bahasa Indonesia",
+        "cakupan": None,  # ditentukan oleh jawaban server
+        "catatan": (
+            "Pilihan kedua pada SMART Universitas Pertamina. "
+            "Teks dikirim ke server Aurora di Eropa untuk diproses, sehingga memerlukan koneksi internet."
+        ),
+    },
     "🧠 mDeBERTa-v3 (Zero-Shot, Multibahasa)": {
         "path": "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
         "task": "zero-shot-classification",
@@ -85,6 +108,10 @@ MODEL_REGISTRY = {
 }
 
 BATAS_KATA = 300  # perkiraan kasar batas baca model (512 token)
+
+# Alamat server Aurora SDG API (alamat kedua sebagai cadangan)
+AURORA_URL_UTAMA = "https://aurora-sdg-classifier.uni-due.de/classify/{model}"
+AURORA_URL_CADANGAN = "https://aurora-sdg.labs.vu.nl/classifier/classify/{model}"
 
 # Pengaturan "lebar penuh" yang cocok untuk Streamlit versi lama maupun baru
 _VERSI_ST = tuple(int(x) for x in st.__version__.split(".")[:2])
@@ -179,6 +206,45 @@ def klasifikasi(classifier, task, text):
     return skor
 
 
+def _baca_jawaban_aurora(data):
+    """Mengubah jawaban server Aurora menjadi skor SDG 1-17 dan daftar SDG yang dicakup."""
+    skor = {no: 0.0 for no in range(1, 18)}
+    cakupan = []
+    for item in data.get("predictions", []):
+        try:
+            no = int(item["sdg"]["code"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 1 <= no <= 17:
+            skor[no] = float(item["prediction"])
+            cakupan.append(no)
+    if not cakupan:
+        raise ValueError("Jawaban server Aurora tidak berisi skor SDG.")
+    return skor, sorted(cakupan)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def klasifikasi_aurora(model, text):
+    """Mengirim teks ke Aurora SDG API. Mencoba POST ke alamat utama,
+    lalu GET ke alamat cadangan bila gagal."""
+    kesalahan = None
+    try:
+        r = requests.post(AURORA_URL_UTAMA.format(model=model), json={"text": text}, timeout=60)
+        r.raise_for_status()
+        return _baca_jawaban_aurora(r.json())
+    except Exception as e:
+        kesalahan = e
+    try:
+        # GET hanya menerima teks pendek, jadi teks dipotong (model hanya membaca bagian awal)
+        r = requests.get(
+            AURORA_URL_CADANGAN.format(model=model), params={"text": text[:1500]}, timeout=60
+        )
+        r.raise_for_status()
+        return _baca_jawaban_aurora(r.json())
+    except Exception as e:
+        raise RuntimeError(f"{kesalahan} | {e}")
+
+
 def ambil_teks_pdf():
     """Mengambil teks dari 2 halaman pertama PDF lalu memasukkannya ke kotak teks."""
     file_pdf = st.session_state.get("file_pdf")
@@ -202,7 +268,7 @@ def ambil_teks_pdf():
 
 def tampilkan_hasil(hasil):
     info = MODEL_REGISTRY[hasil["model"]]
-    cakupan = set(info["cakupan"])
+    cakupan = set(hasil.get("cakupan") or range(1, 18))
 
     df = pd.DataFrame(
         {
@@ -237,13 +303,14 @@ def tampilkan_hasil(hasil):
             unsafe_allow_html=True,
         )
 
-    if info["task"] == "zero-shot-classification":
+    if info["task"] == "text-classification":
         st.caption(
-            "Skor zero-shot dihitung terpisah untuk setiap SDG (0–100%), sehingga jumlahnya tidak harus 100%."
+            "Skor model fine-tuned dibagi ke SDG yang dicakup model. "
+            "Skor antar-model tidak dapat dibandingkan secara langsung."
         )
     else:
         st.caption(
-            "Skor model fine-tuned dibagi ke SDG yang dicakup model. "
+            "Skor dihitung terpisah untuk setiap SDG (0–100%), sehingga jumlahnya tidak harus 100%. "
             "Skor antar-model tidak dapat dibandingkan secara langsung."
         )
 
@@ -352,6 +419,8 @@ with st.sidebar:
     )
     st.markdown("### 🤖 Model yang Tersedia")
     st.markdown(
+        "- **Elsevier SDG mBERT**: multibahasa, via Aurora API\n"
+        "- **Aurora SDG mBERT**: multibahasa, via Aurora API\n"
         "- **mDeBERTa-v3**: zero-shot, multibahasa\n"
         "- **sdgBERT**: fine-tuned, Bahasa Inggris\n"
         "- **OSDG SDG Classifier**: fine-tuned, Bahasa Inggris"
@@ -378,12 +447,16 @@ with tab_analisis:
         st.markdown(
             f"**Jenis:** {info_model['jenis']}  \n"
             f"**Bahasa:** {info_model['bahasa']}  \n"
-            f"**Cakupan:** SDG {info_model['cakupan'][0]}–{info_model['cakupan'][-1]}"
+            + (
+                f"**Cakupan:** SDG {info_model['cakupan'][0]}–{info_model['cakupan'][-1]}"
+                if info_model["cakupan"]
+                else "**Cakupan:** mengikuti jawaban server Aurora"
+            )
         )
-        if info_model["task"] == "zero-shot-classification":
-            st.success(info_model["catatan"])
-        else:
+        if info_model["task"] == "text-classification":
             st.warning(info_model["catatan"])
+        else:
+            st.info(info_model["catatan"])
 
         st.markdown("---")
         st.markdown("### 📥 Input Dokumen")
@@ -439,15 +512,37 @@ with tab_analisis:
             if text.strip() == "":
                 st.error("⚠️ Mohon masukkan judul dan abstrak terlebih dahulu.")
             else:
-                with st.spinner(
-                    f"Menyiapkan {nama_model}... (pemuatan pertama dapat memakan waktu beberapa menit)"
-                ):
-                    classifier = load_classifier(info_model["path"], info_model["task"])
-                with st.spinner("Model AI sedang membaca teks..."):
-                    mulai = time.perf_counter()
-                    skor = klasifikasi(classifier, info_model["task"], text)
-                    durasi = time.perf_counter() - mulai
-                st.session_state["hasil"] = {"model": nama_model, "skor": skor, "waktu": durasi}
+                if info_model["task"] == "aurora-api":
+                    with st.spinner("Mengirim teks ke server Aurora SDG API..."):
+                        mulai = time.perf_counter()
+                        try:
+                            skor, cakupan = klasifikasi_aurora(info_model["path"], text)
+                            st.session_state["hasil"] = {
+                                "model": nama_model,
+                                "skor": skor,
+                                "cakupan": cakupan,
+                                "waktu": time.perf_counter() - mulai,
+                            }
+                        except Exception:
+                            st.error(
+                                "Server Aurora SDG API tidak dapat dihubungi atau sedang sibuk. "
+                                "Coba lagi beberapa saat, atau pilih model lain."
+                            )
+                else:
+                    with st.spinner(
+                        f"Menyiapkan {nama_model}... (pemuatan pertama dapat memakan waktu beberapa menit)"
+                    ):
+                        classifier = load_classifier(info_model["path"], info_model["task"])
+                    with st.spinner("Model AI sedang membaca teks..."):
+                        mulai = time.perf_counter()
+                        skor = klasifikasi(classifier, info_model["task"], text)
+                        durasi = time.perf_counter() - mulai
+                    st.session_state["hasil"] = {
+                        "model": nama_model,
+                        "skor": skor,
+                        "cakupan": info_model["cakupan"],
+                        "waktu": durasi,
+                    }
 
         if "hasil" in st.session_state:
             tampilkan_hasil(st.session_state["hasil"])
@@ -459,34 +554,53 @@ with tab_metodologi:
         """
 ### 🔬 Metodologi Klasifikasi MALAQBI
 
-MALAQBI memetakan judul dan abstrak karya ilmiah ke dalam 17 Tujuan Pembangunan Berkelanjutan (SDGs)
-menggunakan model bahasa (*language model*) dari Hugging Face Hub. Pengguna dapat memilih satu dari tiga model
-dengan pendekatan yang berbeda.
+MALAQBI memetakan judul dan abstrak karya ilmiah ke dalam 17 Tujuan Pembangunan Berkelanjutan (SDGs).
+Pengguna dapat memilih satu dari lima model AI dengan pendekatan dan "definisi SDG" yang berbeda.
+
+#### MALAQBI tidak membuat model AI baru
+MALAQBI adalah **arsitektur sistem**: alur pengolahan teks, perumusan kategori SDG, pilihan model,
+visualisasi, dan validasi terhadap penilaian pakar. Model bahasa yang digunakan adalah model terbuka
+yang telah dilatih oleh lembaga lain, sebagaimana lazim pada platform sejenis (misalnya SMART Universitas
+Pertamina yang menggunakan model Elsevier SDG mBERT). Ibaratnya, model AI adalah "mikroskop", sedangkan
+MALAQBI adalah "laboratorium" yang menentukan cara mikroskop itu digunakan dan diuji.
 
 #### Model yang digunakan
 
 | Model | Pendekatan | Bahasa | Cakupan SDG |
 |---|---|---|---|
+| Elsevier SDG mBERT (`elsevier-sdg-multi`, Aurora SDG API) | Fine-Tuned mBERT, definisi SDG Elsevier | 104 bahasa, termasuk Indonesia | SDG 1–16 |
+| Aurora SDG mBERT (`aurora-sdg-multi`, Aurora SDG API) | Fine-Tuned mBERT, definisi SDG Aurora | 104 bahasa, termasuk Indonesia | Mengikuti server |
 | `MoritzLaurer/mDeBERTa-v3-base-mnli-xnli` | Zero-Shot (NLI) | Multibahasa, termasuk Indonesia | SDG 1–17 |
 | `sadickam/sdg-classification-bert` (sdgBERT) | Fine-Tuned BERT (OSDG Community Dataset) | Inggris | SDG 1–16 |
 | `jonas/sdg_classifier_osdg` | Fine-Tuned BERT (data komunitas OSDG) | Inggris | SDG 1–15 |
 
-#### 1. Zero-Shot Classification (mDeBERTa-v3)
+#### 1. Model mBERT melalui Aurora SDG API (Elsevier dan Aurora)
+- Model BERT multibahasa yang dilatih dengan jutaan abstrak ilmiah yang dilabeli menggunakan kueri
+  kata kunci SDG versi Elsevier atau versi Aurora Universities Network.
+- Diakses melalui layanan publik **Aurora SDG API**: teks dikirim ke server Aurora dan skor dikembalikan
+  ke MALAQBI. Model tidak perlu diunduh, tetapi memerlukan koneksi internet.
+- Setiap SDG dinilai terpisah (*multi-label*).
+
+#### 2. Zero-Shot Classification (mDeBERTa-v3)
 - Model **tidak dilatih khusus** untuk SDGs. Model menilai apakah teks mendukung sebuah pernyataan,
   sebuah teknik yang disebut *Natural Language Inference* (NLI).
 - Untuk setiap SDG, model menguji pernyataan:
   *"Teks dokumen ini membahas topik tentang {nama SDG}."*
 - Setiap SDG dinilai terpisah (*multi-label*), sehingga satu penelitian dapat relevan dengan beberapa SDG sekaligus.
-- Karena multibahasa, model ini dapat membaca abstrak Bahasa Indonesia secara langsung.
 
-#### 2. Fine-Tuned Classification (sdgBERT dan OSDG SDG Classifier)
+#### 3. Fine-Tuned Classification (sdgBERT dan OSDG SDG Classifier)
 - Model BERT yang telah **dilatih ulang** menggunakan teks berlabel SDG dari komunitas OSDG.
-- Model langsung memberikan skor untuk setiap SDG yang dikenalnya.
 - Kedua model dilatih dengan teks berbahasa Inggris dan **tidak mencakup seluruh 17 SDG**.
+
+#### Mengapa hasil setiap model berbeda?
+Setiap model belajar dari **definisi SDG yang berbeda**: kueri kata kunci Elsevier, kueri Aurora,
+label relawan OSDG, atau (pada zero-shot) hanya dari kalimat deskripsi SDG. Karena itu, teks yang sama
+dapat memperoleh SDG utama yang berbeda. Perbedaan seperti ini juga ditemukan pada sistem pemetaan SDG
+internasional (Armitage dkk., 2020). Untuk itu MALAQBI menguji setiap model terhadap label pakar Unsulbar.
 
 #### Alur proses
 1. **Input**: judul dan abstrak (diketik, ditempel, atau diambil dari 2 halaman pertama PDF).
-2. **Tokenisasi**: teks dipecah menjadi token; model membaca maksimal 512 token pertama.
+2. **Tokenisasi**: teks dipecah menjadi token; model membaca maksimal sekitar 512 token pertama.
 3. **Inferensi**: model menghitung skor relevansi untuk setiap SDG.
 4. **Output**: skor 0–100%, Top 3 SDG, radar chart, bar chart, dan tabel yang dapat diunduh (CSV).
 
@@ -494,7 +608,9 @@ dengan pendekatan yang berbeda.
 - Skor menunjukkan **kedekatan makna** teks dengan tema SDG, bukan ukuran dampak riil penelitian.
 - Skor dari model yang berbeda **tidak dapat dibandingkan secara langsung** karena cara perhitungannya berbeda.
 - Teks yang lebih panjang dari sekitar 512 token akan terpotong.
-- Model fine-tuned kurang andal untuk teks berbahasa Indonesia dan tidak dapat mendeteksi SDG di luar cakupannya.
+- Model Aurora API bergantung pada ketersediaan server pihak ketiga; hindari mengirim naskah yang belum
+  boleh dibagikan.
+- Model sdgBERT dan OSDG kurang andal untuk teks berbahasa Indonesia.
 - Hasil klasifikasi sebaiknya dikonfirmasi oleh peneliti atau pakar bidang terkait (*human-in-the-loop*).
         """
     )
